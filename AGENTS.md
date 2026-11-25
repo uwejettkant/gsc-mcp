@@ -4,7 +4,7 @@
 
 ## 1. What this is
 
-`gsc-mcp` is a minimal, strictly read-only Model Context Protocol (MCP) server for Google Search Console over `stdio`. Users clone it, inspect the source, build it locally, and point their MCP client at `dist/index.js` so Google service-account credentials never pass through unpinned third-party `npx @latest` packages.
+`gsc-mcp` is a minimal, strictly read-only Model Context Protocol (MCP) server for Google Search Console over `stdio`. It is kept small enough to inspect in full before building a pinned commit locally (or using it as a blueprint), so Google service-account credentials never pass through unpinned `npx @latest` auto-updates.
 
 ## 2. Non-negotiable safety invariants
 
