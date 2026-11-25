@@ -1,12 +1,12 @@
 # gsc-mcp
 
-Minimal, strictly **read-only** local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for **Google Search Console**, written in TypeScript (~550 lines across four files).
+Minimal, strictly **read-only** local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for **Google Search Console**, written in TypeScript (~960 lines across four files).
 
-## Why build instead of `npx some-gsc-mcp@latest`?
+## Why a pinned local build instead of `npx ...@latest`?
 
-Connecting Google Search Console to a coding agent requires a Google Cloud service-account key. Passing that key into an unpinned third-party package via `npx -y ...@latest` executes freshly downloaded registry code inside the same process that holds your credentials on every session start.
+Connecting Google Search Console to a coding agent requires a Google Cloud service-account key. Passing that key into an unpinned package via `npx -y ...@latest` downloads and executes whatever was pushed to the registry most recently—inside the same process that holds your credentials—on every session start.
 
-For read-only Search Console reporting, the entire surface is three REST endpoints (`sites.list`, `searchanalytics.query`, `urlInspection.index.inspect`). Cloning a small, auditable repository, building it locally once, and running `node /path/to/gsc-mcp/dist/index.js` keeps the supply chain small and predictable.
+**To anyone else reading this on GitHub, this repository is third-party code too—so do not run it blindly either.** For read-only Search Console reporting, the entire API surface is three endpoints (`sites.list`, `searchanalytics.query`, `urlInspection.index.inspect`). Keeping the server deliberately small (four files in [`src/`](./src), three runtime dependencies, `ignore-scripts=true`) means you can read the full source in a few minutes—especially [`src/gsc-client.ts`](./src/gsc-client.ts), where the key is loaded and the OAuth scope is pinned—before building a fixed commit locally, forking it, or using it as a blueprint to write your own. Once built, nothing updates behind your back.
 
 ## Security Model (Defense in Depth)
 
@@ -65,9 +65,9 @@ Repeat this 30-second step for each property you want to query:
 
 The property becomes immediately visible to `gsc_list_sites`.
 
-### 3. Clone, verify, and build locally
+### 3. Inspect, verify, and build locally
 
-Requires **Node.js 22+** (Node 24 LTS recommended):
+Requires **Node.js 22+** (Node 24 LTS recommended). Read through [`src/`](./src) first (start with [`src/gsc-client.ts`](./src/gsc-client.ts)), then install and build a pinned commit:
 
 ```bash
 git clone https://github.com/uwejettkant/gsc-mcp.git
