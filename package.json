@@ -1,0 +1,59 @@
+{
+  "name": "gsc-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal, strictly read-only local MCP server for Google Search Console",
+  "license": "MIT",
+  "author": "Uwe Jettkant",
+  "homepage": "https://github.com/uwejettkant/gsc-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/uwejettkant/gsc-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/uwejettkant/gsc-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "google-search-console",
+    "gsc",
+    "seo",
+    "claude-code",
+    "antigravity",
+    "read-only"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "gsc-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@googleapis/searchconsole": "^11.0.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.2"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

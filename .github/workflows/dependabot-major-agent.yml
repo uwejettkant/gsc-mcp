@@ -1,0 +1,164 @@
+name: Dependabot Major-Update Agent
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull Request number to fix"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  fix-breaking-changes:
+    name: Gemini Major-Update Agent
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'failure' &&
+        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      )
+
+    steps:
+      - name: Check GEMINI_API_KEY secret
+        id: check_secret
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GEMINI_API_KEY secret is not configured. Skipping Gemini Major-Update Agent."
+          else
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve and validate PR
+        id: pr
+        if: steps.check_secret.outputs.has_key == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR: ${{ inputs.pr_number }}
+          RUN_PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          PR_NUM=""
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            PR_NUM="$INPUT_PR"
+          elif [ -n "$RUN_PR_NUMBER" ]; then
+            PR_NUM="$RUN_PR_NUMBER"
+          elif [ -n "$HEAD_BRANCH" ]; then
+            PR_NUM=$(gh pr list --head "$HEAD_BRANCH" --state open --json number --jq '.[0].number // empty')
+          fi
+
+          if [ -z "$PR_NUM" ]; then
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "No matching open PR found."
+            exit 0
+          fi
+
+          PR_JSON=$(gh pr view "$PR_NUM" --json number,headRefName,baseRefName,isCrossRepository,author,state)
+          IS_CROSS=$(echo "$PR_JSON" | jq -r '.isCrossRepository')
+          AUTHOR=$(echo "$PR_JSON" | jq -r '.author.login')
+          STATE=$(echo "$PR_JSON" | jq -r '.state')
+          HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')
+          BASE_REF=$(echo "$PR_JSON" | jq -r '.baseRefName')
+
+          if [ "$IS_CROSS" != "false" ] || [ "$STATE" != "OPEN" ]; then
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "Ignoring PR #$PR_NUM (isCrossRepository=$IS_CROSS, state=$STATE)."
+            exit 0
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_run" ] && [ "$AUTHOR" != "dependabot[bot]" ] && [ "$AUTHOR" != "app/dependabot" ]; then
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "Ignoring PR #$PR_NUM (author=$AUTHOR is not dependabot)."
+            exit 0
+          fi
+
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+          echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$BASE_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR branch
+        if: steps.pr.outputs.valid == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.pr.outputs.head_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        if: steps.pr.outputs.valid == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.pr.outputs.valid == 'true'
+        run: npm ci
+
+      - name: Run Gemini CLI to fix breaking changes
+        if: steps.pr.outputs.valid == 'true'
+        uses: google-github-actions/run-gemini-cli@v0.1.22
+        env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          prompt: |
+            This Pull Request (#${{ steps.pr.outputs.number }}) updates dependencies from origin/${{ steps.pr.outputs.base_ref }} and failed CI (`npm run check`).
+            Inspect the dependency diff (`git diff origin/${{ steps.pr.outputs.base_ref }}...HEAD -- package.json package-lock.json`) and run `npm run check` (`npm run typecheck`, `npm test`, `npm run build`) to see what broke.
+            Fix the breaking changes in the codebase cleanly, following the rules in AGENTS.md.
+            Re-run `npm run check` until all checks pass.
+            Do NOT run `git commit` or `git push`.
+
+      - name: Run deterministic repository checks
+        id: verify
+        if: steps.pr.outputs.valid == 'true'
+        continue-on-error: true
+        run: npm run check
+
+      - name: Commit, push, and comment on PR if checks pass
+        if: steps.pr.outputs.valid == 'true' && steps.verify.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+        run: |
+          rm -rf .gemini
+          if [ -z "$(git status --porcelain)" ]; then
+            gh pr comment "$PR_NUMBER" --body "Gemini Major-Update Agent: \`npm run check\` already passes without code changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- ':!.gemini'
+          git commit -m "fix: resolve breaking changes for dependency update"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:${HEAD_REF}"
+
+          gh pr comment "$PR_NUMBER" --body "Gemini Major-Update Agent fixed breaking changes and verified \`npm run check\` (typecheck, Vitest, build). Please review and merge manually (no auto-merge for major updates)."
+
+      - name: Comment on PR if checks still fail
+        if: steps.pr.outputs.valid == 'true' && steps.verify.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body "Gemini Major-Update Agent could not automatically resolve all failures in \`npm run check\`. No changes were pushed; please review manually."
