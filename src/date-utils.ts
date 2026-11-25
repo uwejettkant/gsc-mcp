@@ -34,14 +34,15 @@ export function addDaysUTC(date: Date, days: number): Date {
 
 /**
  * Returns default startDate and endDate for the last `days` days,
- * shifted back by GSC's typical 3-day data availability lag.
+ * shifted back by `lagDays` (defaults to GSC's 3-day finalization lag).
  */
 export function getDefaultDateRange(
   days = 28,
-  now: Date = new Date()
+  now: Date = new Date(),
+  lagDays: number = GSC_DATA_LAG_DAYS
 ): { startDate: string; endDate: string } {
   const todayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const end = addDaysUTC(todayUTC, -GSC_DATA_LAG_DAYS);
+  const end = addDaysUTC(todayUTC, -lagDays);
   const start = addDaysUTC(end, -(days - 1));
   return {
     startDate: formatDateUTC(start),
@@ -51,18 +52,20 @@ export function getDefaultDateRange(
 
 /**
  * Resolves and validates startDate and endDate for single-period analytics queries.
- * - Both omitted: last `days` days ending at today - 3 days.
+ * - Both omitted: last `days` days ending at today - `lagDays`.
  * - Only endDate provided: `days` days ending at endDate.
- * - Only startDate provided: from startDate up to default endDate (today - 3 days).
+ * - Only startDate provided: from startDate up to default endDate (today - `lagDays`).
  */
 export function resolveAnalyticsDateRange(params: {
   startDate?: string;
   endDate?: string;
   days?: number;
+  lagDays?: number;
   now?: Date;
 }): { startDate: string; endDate: string } {
   const days = params.days ?? 28;
-  const defaults = getDefaultDateRange(days, params.now);
+  const lagDays = params.lagDays ?? GSC_DATA_LAG_DAYS;
+  const defaults = getDefaultDateRange(days, params.now, lagDays);
 
   let start: Date;
   let end: Date;
@@ -101,7 +104,8 @@ export interface ComparisonRanges {
 }
 
 /**
- * Computes and validates current and previous date ranges for period-over-period comparisons.
+ * Computes and validates two non-overlapping, equal-length periods for
+ * period-over-period comparisons.
  */
 export function resolveComparisonRanges(params: {
   days?: number;
@@ -111,11 +115,15 @@ export function resolveComparisonRanges(params: {
   previousEndDate?: string;
   now?: Date;
 }): ComparisonRanges {
-  const days = params.days ?? 28;
-
   if ((params.currentStartDate !== undefined) !== (params.currentEndDate !== undefined)) {
     throw new Error(
       "Provide both currentStartDate and currentEndDate, or omit both to use `days`."
+    );
+  }
+
+  if (params.days !== undefined && params.currentStartDate !== undefined) {
+    throw new Error(
+      "Provide either `days` or explicit `currentStartDate`/`currentEndDate`, not both."
     );
   }
 
@@ -125,6 +133,7 @@ export function resolveComparisonRanges(params: {
     );
   }
 
+  const days = params.days ?? 28;
   const defaults = getDefaultDateRange(days, params.now);
   const currentStartDate = params.currentStartDate ?? defaults.startDate;
   const currentEndDate = params.currentEndDate ?? defaults.endDate;
@@ -135,11 +144,25 @@ export function resolveComparisonRanges(params: {
     throw new Error("currentEndDate must be on or after currentStartDate.");
   }
 
+  const currentSpanDays =
+    Math.round((currentEnd.getTime() - currentStart.getTime()) / 86_400_000) + 1;
+
   if (params.previousStartDate !== undefined && params.previousEndDate !== undefined) {
     const prevStart = parseDateUTC(params.previousStartDate);
     const prevEnd = parseDateUTC(params.previousEndDate);
     if (prevEnd < prevStart) {
       throw new Error("previousEndDate must be on or after previousStartDate.");
+    }
+    if (prevEnd >= currentStart) {
+      throw new Error(
+        "previousEndDate must precede currentStartDate so comparison periods do not overlap."
+      );
+    }
+    const prevSpanDays = Math.round((prevEnd.getTime() - prevStart.getTime()) / 86_400_000) + 1;
+    if (prevSpanDays !== currentSpanDays) {
+      throw new Error(
+        `Comparison periods must have equal length (current: ${currentSpanDays} days, previous: ${prevSpanDays} days).`
+      );
     }
     return {
       currentStartDate: formatDateUTC(currentStart),
@@ -149,9 +172,8 @@ export function resolveComparisonRanges(params: {
     };
   }
 
-  const spanDays = Math.round((currentEnd.getTime() - currentStart.getTime()) / 86_400_000) + 1;
   const previousEnd = addDaysUTC(currentStart, -1);
-  const previousStart = addDaysUTC(previousEnd, -(spanDays - 1));
+  const previousStart = addDaysUTC(previousEnd, -(currentSpanDays - 1));
 
   return {
     currentStartDate: formatDateUTC(currentStart),

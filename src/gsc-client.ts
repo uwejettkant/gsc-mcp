@@ -4,6 +4,7 @@ import path from "node:path";
 import { auth, searchconsole, type searchconsole_v1 } from "@googleapis/searchconsole";
 
 export const READONLY_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
+export const MAX_CREDENTIALS_FILE_BYTES = 64 * 1024;
 
 export type SearchConsoleClient = searchconsole_v1.Searchconsole;
 
@@ -33,8 +34,9 @@ export function resolveCredentialsPath(
 }
 
 /**
- * Verifies that the credentials path points to an existing regular file and
- * warns on stderr if group/other permissions are open on POSIX systems.
+ * Verifies that the credentials path points to an existing regular file (never
+ * a symbolic link), enforces a strict file-size ceiling, and warns on stderr if
+ * group/other permissions are open on POSIX systems.
  */
 export function validateCredentialsFile(
   credentialsPath: string,
@@ -43,7 +45,7 @@ export function validateCredentialsFile(
 ): void {
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(credentialsPath);
+    stat = fs.lstatSync(credentialsPath);
   } catch {
     throw new Error(
       `GSC credentials file not found at "${credentialsPath}". ` +
@@ -51,8 +53,30 @@ export function validateCredentialsFile(
     );
   }
 
+  if (stat.isSymbolicLink()) {
+    throw new Error(`GSC credentials path "${credentialsPath}" must not be a symbolic link.`);
+  }
+
   if (!stat.isFile()) {
     throw new Error(`GSC credentials path "${credentialsPath}" is not a regular file.`);
+  }
+
+  if (stat.size > MAX_CREDENTIALS_FILE_BYTES) {
+    throw new Error(
+      `GSC credentials file at "${credentialsPath}" exceeds maximum allowed size (${MAX_CREDENTIALS_FILE_BYTES} bytes).`
+    );
+  }
+
+  if (
+    platform !== "win32" &&
+    typeof process.geteuid === "function" &&
+    process.geteuid() !== 0 &&
+    stat.uid !== process.geteuid() &&
+    stat.uid !== 0
+  ) {
+    throw new Error(
+      `GSC credentials file at "${credentialsPath}" is owned by unexpected UID ${stat.uid}.`
+    );
   }
 
   if (platform !== "win32" && (stat.mode & 0o077) !== 0 && !warnedPaths.has(credentialsPath)) {
@@ -60,7 +84,7 @@ export function validateCredentialsFile(
     const octalMode = (stat.mode & 0o777).toString(8).padStart(3, "0");
     warn(
       `[gsc-mcp] Warning: credentials file "${credentialsPath}" has permissions ${octalMode}. ` +
-        `Run "chmod 600 ${credentialsPath}" to restrict access to your user account.`
+        `Run "chmod 600 '${credentialsPath}'" to restrict access to your user account.`
     );
   }
 }
@@ -70,6 +94,66 @@ export interface ServiceAccountCredentials {
   private_key: string;
 }
 
+function readCredentialsFileSafely(credentialsPath: string): string {
+  const noFollowFlag =
+    process.platform !== "win32" && "O_NOFOLLOW" in fs.constants ? fs.constants.O_NOFOLLOW : 0;
+
+  let fd: number;
+  try {
+    fd = fs.openSync(credentialsPath, fs.constants.O_RDONLY | noFollowFlag);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ELOOP") {
+      throw new Error(`GSC credentials path "${credentialsPath}" must not be a symbolic link.`);
+    }
+    if (code === "ENOENT") {
+      throw new Error(
+        `GSC credentials file not found at "${credentialsPath}". ` +
+          `Set GSC_CREDENTIALS_PATH or place your service-account JSON at ~/.config/gsc/service-account.json.`
+      );
+    }
+    throw new Error(`Unable to open GSC credentials file at "${credentialsPath}".`);
+  }
+
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      throw new Error(`GSC credentials path "${credentialsPath}" is not a regular file.`);
+    }
+    if (stat.size > MAX_CREDENTIALS_FILE_BYTES) {
+      throw new Error(
+        `GSC credentials file at "${credentialsPath}" exceeds maximum allowed size (${MAX_CREDENTIALS_FILE_BYTES} bytes).`
+      );
+    }
+
+    const buffer = Buffer.alloc(MAX_CREDENTIALS_FILE_BYTES + 1);
+    let totalBytes = 0;
+    while (totalBytes <= MAX_CREDENTIALS_FILE_BYTES) {
+      const bytesRead = fs.readSync(
+        fd,
+        buffer,
+        totalBytes,
+        buffer.length - totalBytes,
+        null
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      totalBytes += bytesRead;
+    }
+
+    if (totalBytes > MAX_CREDENTIALS_FILE_BYTES) {
+      throw new Error(
+        `GSC credentials file at "${credentialsPath}" exceeds maximum allowed size (${MAX_CREDENTIALS_FILE_BYTES} bytes).`
+      );
+    }
+
+    return buffer.subarray(0, totalBytes).toString("utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /**
  * Reads and validates that the credentials file is specifically a Google
  * `service_account` key (preventing `external_account` credential-sourcing
@@ -77,14 +161,16 @@ export interface ServiceAccountCredentials {
  * Never includes secret values in thrown error messages.
  */
 export function loadServiceAccountCredentials(credentialsPath: string): ServiceAccountCredentials {
+  const rawJson = readCredentialsFileSafely(credentialsPath);
+
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(credentialsPath, "utf8"));
+    parsed = JSON.parse(rawJson);
   } catch {
     throw new Error(`GSC credentials file at "${credentialsPath}" is not valid JSON.`);
   }
 
-  if (!parsed || typeof parsed !== "object") {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`GSC credentials file at "${credentialsPath}" must contain a JSON object.`);
   }
 
@@ -122,10 +208,32 @@ export function resetClientCache(): void {
 }
 
 /**
+ * Performs a non-fatal permission check at server startup when the configured
+ * credentials file already exists on disk, so group/world-readable keys trigger
+ * an immediate stderr warning without breaking `tools/list` before setup.
+ */
+export function checkCredentialsPermissionsOnStartup(
+  env: NodeJS.ProcessEnv = process.env,
+  homedir?: string,
+  warn: (message: string) => void = console.error,
+  platform: NodeJS.Platform = process.platform
+): void {
+  const credentialsPath = resolveCredentialsPath(env, homedir);
+  try {
+    validateCredentialsFile(credentialsPath, warn, platform);
+  } catch {
+    // Defer missing/invalid file errors until an actual GSC tool invocation.
+  }
+}
+
+/**
  * Returns a cached, strictly read-only Google Search Console API client.
  */
-export function getSearchConsoleClient(): SearchConsoleClient {
-  const credentialsPath = resolveCredentialsPath();
+export function getSearchConsoleClient(
+  env: NodeJS.ProcessEnv = process.env,
+  homedir?: string
+): SearchConsoleClient {
+  const credentialsPath = resolveCredentialsPath(env, homedir);
 
   if (cachedClient && cachedCredentialsPath === credentialsPath) {
     return cachedClient;

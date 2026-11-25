@@ -35,8 +35,8 @@ npm start           # runs node dist/index.js on stdio
 
 | File | Responsibility |
 | :--- | :--- |
-| `src/index.ts` | CLI entry point (`#!/usr/bin/env node`): connects `createGscServer()` to `StdioServerTransport`. |
-| `src/server.ts` | `createGscServer` plus pure formatting, sorting, and period-comparison helpers. `gsc_compare_periods` queries ungrouped property totals alongside dimension rows so Google's privacy thresholding on `query` rows never undercounts site clicks/impressions. |
-| `src/gsc-client.ts` | Resolves `GSC_CREDENTIALS_PATH` (default `~/.config/gsc/service-account.json`), checks file existence and POSIX `0600` permissions, caches the read-only Search Console v1 client, and formats API errors cleanly. |
+| `src/index.ts` | CLI entry point (`#!/usr/bin/env node`): runs a non-fatal startup permission check and connects `createGscServer()` to `StdioServerTransport`. |
+| `src/server.ts` | `createGscServer` plus pure formatting, sorting, and period-comparison helpers. `gsc_compare_periods` queries ungrouped property totals alongside dimension rows so Google's privacy thresholding on `query` rows never undercounts site clicks/impressions, and skips one-sided truncated keys when `fetchLimit` is reached. |
+| `src/gsc-client.ts` | Resolves `GSC_CREDENTIALS_PATH` (default `~/.config/gsc/service-account.json`), rejects symlinks and oversized files via `lstatSync` + `O_NOFOLLOW`, checks POSIX `0600` permissions, caches the read-only Search Console v1 client, and formats API errors cleanly. |
 | `src/date-utils.ts` | Strict UTC `YYYY-MM-DD` validation (rejecting calendar rollovers like `2026-02-31`), 3-day GSC lag defaults, and single/comparison period resolution. |
 | `tests/*.test.ts` | Unit tests and end-to-end MCP protocol tests over `InMemoryTransport` with mocked Search Console clients (no network or real credentials required). |

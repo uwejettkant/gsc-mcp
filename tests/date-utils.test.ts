@@ -11,9 +11,9 @@ import {
 describe("date-utils", () => {
   const fixedNow = new Date("2026-11-25T16:00:00.000Z");
 
-  it("parses valid YYYY-MM-DD strings and formats them back identically", () => {
-    const parsed = parseDateUTC("2026-02-28");
-    expect(formatDateUTC(parsed)).toBe("2026-02-28");
+  it("parses valid YYYY-MM-DD strings including leap years and formats them back identically", () => {
+    expect(formatDateUTC(parseDateUTC("2026-02-28"))).toBe("2026-02-28");
+    expect(formatDateUTC(parseDateUTC("2024-02-29"))).toBe("2024-02-29");
   });
 
   it("rejects malformed date strings and impossible calendar dates that roll over", () => {
@@ -25,13 +25,19 @@ describe("date-utils", () => {
     expect(() => parseDateUTC("2026-13-01")).toThrow(/Invalid calendar date/);
   });
 
-  it("computes the 28-day default window shifted back by the 3-day GSC lag", () => {
+  it("computes the 28-day default window shifted back by the 3-day GSC lag or 0-day fresh lag", () => {
     const range = getDefaultDateRange(28, fixedNow);
     expect(range).toEqual({
       startDate: "2026-10-26",
       endDate: "2026-11-22",
     });
     expect(addDaysUTC(parseDateUTC(range.startDate), 27)).toEqual(parseDateUTC(range.endDate));
+
+    const freshRange = resolveAnalyticsDateRange({ days: 7, lagDays: 0, now: fixedNow });
+    expect(freshRange).toEqual({
+      startDate: "2026-11-19",
+      endDate: "2026-11-25",
+    });
   });
 
   it("anchors startDate relative to explicit endDate when startDate is omitted", () => {
@@ -84,7 +90,7 @@ describe("date-utils", () => {
     });
   });
 
-  it("derives matching previous period span from explicit current dates", () => {
+  it("derives matching previous period span from explicit current dates and accepts valid explicit previous ranges", () => {
     const ranges = resolveComparisonRanges({
       currentStartDate: "2026-11-01",
       currentEndDate: "2026-11-10",
@@ -96,9 +102,23 @@ describe("date-utils", () => {
       previousStartDate: "2026-10-22",
       previousEndDate: "2026-10-31",
     });
+
+    const yoy = resolveComparisonRanges({
+      currentStartDate: "2026-11-01",
+      currentEndDate: "2026-11-10",
+      previousStartDate: "2025-11-01",
+      previousEndDate: "2025-11-10",
+      now: fixedNow,
+    });
+    expect(yoy).toEqual({
+      currentStartDate: "2026-11-01",
+      currentEndDate: "2026-11-10",
+      previousStartDate: "2025-11-01",
+      previousEndDate: "2025-11-10",
+    });
   });
 
-  it("rejects half-specified current or previous date pairs instead of ignoring them", () => {
+  it("rejects half-specified, conflicting, overlapping, or unequal-length comparison periods", () => {
     expect(() =>
       resolveComparisonRanges({
         currentStartDate: "2026-11-01",
@@ -112,5 +132,34 @@ describe("date-utils", () => {
         now: fixedNow,
       })
     ).toThrow(/both previousStartDate and previousEndDate/);
+
+    expect(() =>
+      resolveComparisonRanges({
+        days: 90,
+        currentStartDate: "2026-11-01",
+        currentEndDate: "2026-11-10",
+        now: fixedNow,
+      })
+    ).toThrow(/either `days` or explicit/);
+
+    expect(() =>
+      resolveComparisonRanges({
+        currentStartDate: "2026-11-01",
+        currentEndDate: "2026-11-10",
+        previousStartDate: "2026-10-25",
+        previousEndDate: "2026-11-03",
+        now: fixedNow,
+      })
+    ).toThrow(/do not overlap/);
+
+    expect(() =>
+      resolveComparisonRanges({
+        currentStartDate: "2026-11-01",
+        currentEndDate: "2026-11-10",
+        previousStartDate: "2026-10-01",
+        previousEndDate: "2026-10-05",
+        now: fixedNow,
+      })
+    ).toThrow(/equal length/);
   });
 });
