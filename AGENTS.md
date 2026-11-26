@@ -15,7 +15,7 @@ Every invariant below is backed by unit or protocol tests in `tests/`. If a chan
 3. **Zero credential leakage:** Never read, print, or include service-account JSON contents, private keys, or tokens in tool responses, error messages, logs, tests, or commits. On POSIX systems, warn on `stderr` if the credentials file has group/world permissions (`mode & 0o077`).
 4. **Placeholder domains only:** All tool descriptions, examples, tests, and documentation in this repository must use RFC 2606 placeholders (`example.com`, `sc-domain:example.com`, `your-project-id`). Never commit real user or client domains, project IDs, or service-account email addresses.
 5. **Minimal dependency surface:** Keep runtime dependencies limited to `@modelcontextprotocol/sdk`, `@googleapis/searchconsole`, and `zod`. Do not install the monolithic `googleapis` package.
-6. **Quality gate before every commit:** Run `npm run check` (`typecheck`, `vitest run`, `tsc` build) and `npm audit`. Every new test covering a bug or safety rule must be verified once via mutation (temporarily break the guarded line in `src/` and confirm the test turns red).
+6. **Quality gate before every commit:** Run `npm run check` (`typecheck`, `vitest run`, `tsc` build; skip for pure documentation edits that touch no code or config). Run `npm audit` whenever `package.json` or `package-lock.json` changes and once before merging to `main`. Every new test covering a bug or safety rule must be verified once via mutation (temporarily break the guarded line in `src/` and confirm the test turns red).
 7. **Git and publishing:** Use Conventional Commits on feature/fix branches. Never run `git push`, create tags/releases, or run `npm publish` without the maintainer's explicit approval.
 
 ## 3. Commands
