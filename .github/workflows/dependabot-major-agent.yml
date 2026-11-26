@@ -104,6 +104,25 @@ jobs:
         if: steps.pr.outputs.valid == 'true'
         run: npm ci
 
+      - name: Resolve Gemini CLI version (>= 7-day release cooldown)
+        id: cli_version
+        if: steps.pr.outputs.valid == 'true'
+        run: |
+          set -euo pipefail
+          VERSION=$(node -e '
+            const { execFileSync } = require("node:child_process");
+            const raw = execFileSync("npm", ["view", "@google/gemini-cli", "time", "--json"], { encoding: "utf8" });
+            const times = JSON.parse(raw);
+            const cutoff = Date.now() - 7 * 86_400_000;
+            const stable = Object.entries(times)
+              .filter(([v, t]) => /^\d+\.\d+\.\d+$/.test(v) && Date.parse(t) <= cutoff)
+              .sort((a, b) => Date.parse(b[1]) - Date.parse(a[1]));
+            if (!stable.length) process.exit(1);
+            process.stdout.write(stable[0][0]);
+          ')
+          echo "Resolved @google/gemini-cli version (>=7d old): $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Run Gemini CLI to fix breaking changes
         if: steps.pr.outputs.valid == 'true'
         uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
@@ -111,7 +130,7 @@ jobs:
           GEMINI_CLI_TRUST_WORKSPACE: "true"
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
-          gemini_cli_version: "0.71.1"
+          gemini_cli_version: ${{ steps.cli_version.outputs.version }}
           github_pr_number: ${{ steps.pr.outputs.number }}
           settings: |
             {
