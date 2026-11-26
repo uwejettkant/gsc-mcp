@@ -7,8 +7,18 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Europe/Berlin"
+    cooldown:
+      default-days: 7
     groups:
-      minor-and-patch:
+      prod-minor-and-patch:
+        dependency-type: "production"
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      dev-minor-and-patch:
+        dependency-type: "development"
         patterns:
           - "*"
         update-types:
@@ -22,6 +32,8 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Europe/Berlin"
+    cooldown:
+      default-days: 7
     groups:
       minor-and-patch:
         patterns:

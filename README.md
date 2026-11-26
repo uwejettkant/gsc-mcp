@@ -1,6 +1,6 @@
 # gsc-mcp
 
-Minimal, strictly **read-only** local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for **Google Search Console**, written in TypeScript (~960 lines across four files).
+Minimal, strictly **read-only** local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for **Google Search Console**, written in TypeScript (~1,200 lines across four files).
 
 ## Why a pinned local build instead of `npx ...@latest`?
 
@@ -32,7 +32,7 @@ All tools carry MCP `readOnlyHint: true` and `destructiveHint: false` annotation
 Using the [Google Cloud CLI (`gcloud`)](https://cloud.google.com/sdk/docs/install):
 
 ```bash
-export GCP_PROJECT="my-gsc-mcp-project"
+export GCP_PROJECT="your-project-id" # must be globally unique in Google Cloud
 export SA_NAME="gsc-reader"
 export SA_EMAIL="${SA_NAME}@${GCP_PROJECT}.iam.gserviceaccount.com"
 
@@ -61,7 +61,7 @@ Repeat this 30-second step for each property you want to query:
 
 1. Open [Google Search Console](https://search.google.com/search-console) and select your property (e.g., `example.com`).
 2. Go to **Settings -> Users and permissions -> Add user**.
-3. Enter your service-account email (`gsc-reader@my-gsc-mcp-project.iam.gserviceaccount.com`) with permission **Restricted**.
+3. Enter your service-account email (`gsc-reader@your-project-id.iam.gserviceaccount.com`) with permission **Restricted**.
 
 The property becomes immediately visible to `gsc_list_sites`.
 
@@ -72,7 +72,9 @@ Requires **Node.js 22+** (Node 24 LTS recommended). Read through [`src/`](./src)
 ```bash
 git clone https://github.com/uwejettkant/gsc-mcp.git
 cd gsc-mcp
+git log -n 1        # Verify the commit you are building (or git checkout <commit-sha>)
 npm ci
+npm audit
 npm run check
 ```
 
@@ -117,6 +119,7 @@ If you store the key somewhere other than `~/.config/gsc/service-account.json`, 
 
 ```bash
 npm run check       # Typecheck (src + tests), Vitest suite, and TypeScript build
+npm audit           # Verify zero known vulnerabilities in locked dependencies
 npm test            # Run unit and in-memory MCP protocol tests
 npm run typecheck   # Strict TypeScript check without emitting files
 npm run build       # Compile TypeScript into dist/

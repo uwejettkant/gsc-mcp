@@ -1,13 +1,21 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import type { SearchConsoleClient } from "../src/gsc-client.js";
 import {
+  buildDimensionFilterGroups,
   comparePeriodRows,
   computeTotals,
   createGscServer,
+  roundMetric,
+  sortRows,
   type SearchAnalyticsRow,
 } from "../src/server.js";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function connectTestClient(mockGsc: Partial<SearchConsoleClient>) {
   const fixedNow = new Date("2026-11-25T16:00:00.000Z");
@@ -23,8 +31,17 @@ function parseToolJson<T>(result: Awaited<ReturnType<Client["callTool"]>>): T {
   return JSON.parse(first?.text ?? "{}") as T;
 }
 
-describe("gsc-mcp server & analytics logic", () => {
-  it("registers only read-only tools and uses exclusively example.com placeholders in schemas", async () => {
+describe("gsc-mcp server, safety invariants & analytics logic", () => {
+  it("enforces minimal runtime dependencies, read-only annotations, and placeholder domains across tools and docs", async () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")
+    ) as { dependencies?: Record<string, string> };
+    expect(Object.keys(pkg.dependencies ?? {}).sort()).toEqual([
+      "@googleapis/searchconsole",
+      "@modelcontextprotocol/sdk",
+      "zod",
+    ]);
+
     const { client, server } = await connectTestClient({});
     const { tools } = await client.listTools();
 
@@ -35,13 +52,48 @@ describe("gsc-mcp server & analytics logic", () => {
       "gsc_inspect_url",
     ]);
 
+    const allowedDomains = new Set([
+      "example.com",
+      "json-schema.org",
+      "googleapis.com",
+      "google.com",
+      "gserviceaccount.com",
+      "modelcontextprotocol.io",
+      "github.com",
+    ]);
+    const domainRegex = /\b(?:[a-z0-9-]+\.)+(?:com|de|io|net|org|dev|app|ai|at|ch|eu|co)\b/gi;
+
     for (const tool of tools) {
       expect(tool.annotations?.readOnlyHint).toBe(true);
       expect(tool.annotations?.destructiveHint).toBe(false);
-      const serialized = JSON.stringify(tool.inputSchema);
-      const domains = serialized.match(/[a-z0-9-]+\.(?:com|de|io|net|org)/gi) ?? [];
+      const serialized = JSON.stringify({
+        title: tool.title,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      });
+      const domains = serialized.match(domainRegex) ?? [];
       for (const domain of domains) {
-        expect(["example.com", "json-schema.org"]).toContain(domain.toLowerCase());
+        const normalized = domain.toLowerCase();
+        const allowed = Array.from(allowedDomains).some(
+          (base) => normalized === base || normalized.endsWith(`.${base}`)
+        );
+        expect(allowed, `Unexpected domain "${domain}" in tool ${tool.name}`).toBe(true);
+      }
+    }
+
+    for (const docFile of ["README.md", "SECURITY.md", "AGENTS.md"]) {
+      const content = fs.readFileSync(path.join(REPO_ROOT, docFile), "utf8");
+      const domains = content.match(domainRegex) ?? [];
+      for (const domain of domains) {
+        const normalized = domain.toLowerCase();
+        const allowed = Array.from(allowedDomains).some(
+          (base) => normalized === base || normalized.endsWith(`.${base}`)
+        );
+        expect(allowed, `Unexpected domain "${domain}" in ${docFile}`).toBe(true);
+      }
+      const saEmails = content.match(/[a-z0-9-]+@([a-z0-9-]+)\.iam\.gserviceaccount\.com/gi) ?? [];
+      for (const email of saEmails) {
+        expect(email).toContain("@your-project-id.iam.gserviceaccount.com");
       }
     }
 
@@ -73,11 +125,88 @@ describe("gsc-mcp server & analytics logic", () => {
     await server.close();
   });
 
-  it("fetches startRow + rowLimit when client-side sorting requires high-offset pagination", async () => {
+  it("genuinely sorts unsorted rows (including zero-click high-impression rows beyond 1000), applies filters, and honors dataState=all", async () => {
+    // Google returns rows ordered by clicks desc, placing 0-click high-impression rows at the end.
+    const fakeRows: SearchAnalyticsRow[] = [
+      ...Array.from({ length: 1005 }, (_, i) => ({
+        keys: [`click-query-${i}`, "https://example.com/a"],
+        clicks: 1005 - i,
+        impressions: 10 + (i % 50),
+        ctr: 0.1,
+        position: 8,
+      })),
+      {
+        keys: ["zero-click-opportunity", "https://example.com/opportunity"],
+        clicks: 0,
+        impressions: 9500,
+        ctr: 0,
+        position: 11.4,
+      },
+    ];
+
+    const queryMock = vi.fn().mockResolvedValue({ data: { rows: fakeRows } });
+    const { client, server } = await connectTestClient({
+      searchanalytics: {
+        query: queryMock,
+      } as unknown as SearchConsoleClient["searchanalytics"],
+    });
+
+    const res = await client.callTool({
+      name: "gsc_search_analytics",
+      arguments: {
+        siteUrl: "sc-domain:example.com",
+        dimensions: ["query", "page"],
+        filters: [{ dimension: "page", operator: "contains", expression: "example.com" }],
+        sortBy: "impressions",
+        sortOrder: "desc",
+        rowLimit: 2,
+        dataState: "all",
+      },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(queryMock).toHaveBeenCalledWith({
+      siteUrl: "sc-domain:example.com",
+      requestBody: {
+        startDate: "2026-10-29",
+        endDate: "2026-11-25",
+        dimensions: ["query", "page"],
+        dimensionFilterGroups: [
+          {
+            groupType: "and",
+            filters: [{ dimension: "page", operator: "contains", expression: "example.com" }],
+          },
+        ],
+        type: "web",
+        rowLimit: 25000,
+        startRow: 0,
+        dataState: "all",
+      },
+    });
+
+    const data = parseToolJson<{
+      returnedRows: number;
+      clientSortTruncated: boolean;
+      rows: Array<{ query: string; page: string; impressions: number; clicks: number }>;
+    }>(res);
+    expect(data.returnedRows).toBe(2);
+    expect(data.clientSortTruncated).toBe(false);
+    expect(data.rows[0]).toMatchObject({
+      query: "zero-click-opportunity",
+      page: "https://example.com/opportunity",
+      impressions: 9500,
+      clicks: 0,
+    });
+
+    await client.close();
+    await server.close();
+  });
+
+  it("supports custom fetchLimit, flags truncation, and rejects startRow + rowLimit > 25000 or duplicate dimensions", async () => {
     const fakeRows: SearchAnalyticsRow[] = Array.from({ length: 1020 }, (_, i) => ({
       keys: [`query-${i}`],
-      clicks: i,
-      impressions: 2000 - i,
+      clicks: 1020 - i,
+      impressions: i + 1, // Ascending in raw payload, so descending sort MUST reverse the array!
       ctr: 0.05,
       position: 5,
     }));
@@ -97,13 +226,13 @@ describe("gsc-mcp server & analytics logic", () => {
         sortOrder: "desc",
         startRow: 990,
         rowLimit: 25,
+        fetchLimit: 1000,
       },
     });
 
     expect(res.isError).toBeFalsy();
     expect(queryMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        siteUrl: "sc-domain:example.com",
         requestBody: expect.objectContaining({
           rowLimit: 1015,
           startRow: 0,
@@ -118,8 +247,31 @@ describe("gsc-mcp server & analytics logic", () => {
     }>(res);
     expect(data.returnedRows).toBe(25);
     expect(data.clientSortTruncated).toBe(true);
-    expect(data.rows[0]?.query).toBe("query-990");
-    expect(data.rows[24]?.query).toBe("query-1014");
+    // Highest impressions is i=1019 (1020 impr); at offset 990 is i=1019-990 = 29 ("query-29", 30 impr)
+    expect(data.rows[0]).toMatchObject({ query: "query-29", impressions: 30 });
+    expect(data.rows[24]).toMatchObject({ query: "query-5", impressions: 6 });
+
+    const overflowRes = await client.callTool({
+      name: "gsc_search_analytics",
+      arguments: {
+        siteUrl: "sc-domain:example.com",
+        sortBy: "position",
+        sortOrder: "asc",
+        startRow: 24990,
+        rowLimit: 20,
+      },
+    });
+    expect(overflowRes.isError).toBe(true);
+    expect((overflowRes.content as Array<{ text: string }>)[0]?.text).toMatch(/cannot exceed 25000/);
+
+    const dupDimRes = await client.callTool({
+      name: "gsc_search_analytics",
+      arguments: {
+        siteUrl: "sc-domain:example.com",
+        dimensions: ["query", "query"],
+      },
+    });
+    expect(dupDimRes.isError).toBe(true);
 
     await client.close();
     await server.close();
@@ -145,7 +297,6 @@ describe("gsc-mcp server & analytics logic", () => {
         };
       }
       if (!isUngrouped && isCurrent) {
-        // Privacy-filtered query breakdown only sums to 256 clicks instead of 361
         return {
           data: {
             rows: [
@@ -193,7 +344,6 @@ describe("gsc-mcp server & analytics logic", () => {
       losers: Array<{ query: string; clicksDiff: number }>;
     }>(res);
 
-    // Must reflect true property-wide totals (361 / 442), NOT the 256 sum of query rows!
     expect(payload.summary.current.clicks).toBe(361);
     expect(payload.summary.previous.clicks).toBe(442);
     expect(payload.summary.delta.clicks).toBe(-81);
@@ -206,33 +356,87 @@ describe("gsc-mcp server & analytics logic", () => {
     await server.close();
   });
 
-  it("filters single-impression noise via minImpressions and ranks position improvements positively", () => {
+  it("filters noise in comparedKeysCount, skips one-sided truncated keys, and breaks ties deterministically", () => {
     const result = comparePeriodRows({
       currentRows: [
         { keys: ["noisy longtail"], clicks: 0, impressions: 1, position: 2 },
         { keys: ["core keyword"], clicks: 25, impressions: 400, position: 3 },
+        { keys: ["tie-low-impr"], clicks: 15, impressions: 50, position: 4 },
+        { keys: ["tie-high-impr"], clicks: 15, impressions: 500, position: 4 },
       ],
       previousRows: [
         { keys: ["noisy longtail"], clicks: 0, impressions: 1, position: 50 },
         { keys: ["core keyword"], clicks: 15, impressions: 350, position: 8 },
+        { keys: ["tie-low-impr"], clicks: 10, impressions: 40, position: 7 },
+        { keys: ["tie-high-impr"], clicks: 10, impressions: 200, position: 7 },
+        { keys: ["dropped-below-cutoff"], clicks: 12, impressions: 6000, position: 9 },
       ],
       dimension: "query",
-      sortBy: "positionDiff",
+      sortBy: "clicksDiff",
       limit: 10,
       minImpressions: 10,
+      currentTruncated: true,
+      previousTruncated: false,
     });
 
-    expect(result.winners).toHaveLength(1);
-    expect(result.winners[0]).toMatchObject({
-      query: "core keyword",
-      positionDiff: 5,
-    });
+    // 5 distinct keys: 1 skipped due to currentTruncated ("dropped-below-cutoff"), 1 filtered by minImpressions ("noisy longtail") => 3 compared
+    expect(result.skippedDueToTruncationCount).toBe(1);
+    expect(result.comparedKeysCount).toBe(3);
+    expect(result.losers).toEqual([]);
+    expect(result.winners.map((w) => w.query)).toEqual([
+      "core keyword",
+      "tie-high-impr",
+      "tie-low-impr",
+    ]);
   });
 
-  it("computes weighted average position across multi-row sets and handles empty rows", () => {
+  it("handles NaN, Infinity, -0, filter groups, and deterministic tie-breaking in helpers", () => {
+    expect(Object.is(roundMetric(-0.0001, 2), 0)).toBe(true);
+    expect(roundMetric(Number.POSITIVE_INFINITY, 2)).toBe(0);
+    expect(roundMetric(Number.NaN, 2)).toBe(0);
+
+    expect(buildDimensionFilterGroups(undefined)).toBeUndefined();
+    expect(buildDimensionFilterGroups([])).toBeUndefined();
+    expect(
+      buildDimensionFilterGroups([
+        { dimension: "query", operator: "contains", expression: "seo" },
+      ])
+    ).toEqual([
+      {
+        groupType: "and",
+        filters: [{ dimension: "query", operator: "contains", expression: "seo" }],
+      },
+    ]);
+
+    const sorted = sortRows(
+      [
+        { keys: ["b-zero"], clicks: 0, impressions: 100 },
+        { keys: ["nan-row"], clicks: Number.NaN, impressions: 50 },
+        { keys: ["a-zero"], clicks: 0, impressions: 100 },
+        { keys: ["high-impr-zero"], clicks: 0, impressions: 500 },
+      ],
+      "clicks",
+      "asc"
+    );
+    expect(sorted.map((r) => r.keys?.[0])).toEqual([
+      "high-impr-zero",
+      "a-zero",
+      "b-zero",
+      "nan-row",
+    ]);
+
     expect(computeTotals([])).toEqual({
       clicks: 0,
       impressions: 0,
+      ctrPercent: 0,
+      avgPosition: 0,
+    });
+
+    expect(
+      computeTotals([{ clicks: Number.NaN, impressions: 10, ctr: Number.NaN, position: Number.NaN }])
+    ).toEqual({
+      clicks: 0,
+      impressions: 10,
       ctrPercent: 0,
       avgPosition: 0,
     });
@@ -250,7 +454,7 @@ describe("gsc-mcp server & analytics logic", () => {
     });
   });
 
-  it("maps URL inspection responses and defaults languageCode to en-US", async () => {
+  it("maps URL inspection responses, defaults languageCode to en-US, and rejects non-HTTP(S) URLs", async () => {
     const inspectMock = vi.fn().mockResolvedValue({
       data: {
         inspectionResult: {
@@ -295,6 +499,18 @@ describe("gsc-mcp server & analytics logic", () => {
     expect(parseToolJson<{ indexStatus: { verdict: string } }>(res).indexStatus.verdict).toBe(
       "PASS"
     );
+
+    for (const badUrl of ["file:///etc/passwd", "javascript:alert(1)", "data:text/plain,hello"]) {
+      const badRes = await client.callTool({
+        name: "gsc_inspect_url",
+        arguments: {
+          siteUrl: "sc-domain:example.com",
+          inspectionUrl: badUrl,
+        },
+      });
+      expect(badRes.isError).toBe(true);
+    }
+    expect(inspectMock).toHaveBeenCalledTimes(1);
 
     await client.close();
     await server.close();

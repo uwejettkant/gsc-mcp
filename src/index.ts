@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { checkCredentialsPermissionsOnStartup, formatGscError } from "./gsc-client.js";
 import { createGscServer } from "./server.js";
 
 async function main() {
+  checkCredentialsPermissionsOnStartup();
   const server = createGscServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -10,6 +12,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("Fatal error starting gsc-mcp:", error);
+  console.error("Fatal error starting gsc-mcp:", formatGscError(error));
   process.exit(1);
 });
